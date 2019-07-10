@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -11,12 +9,15 @@ import (
 	"syscall"
 	"time"
 
+	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
+	remoteworker "github.com/buildbarn/bb-remote-execution/pkg/proto/worker"
+
 	re_blobstore "github.com/buildbarn/bb-remote-execution/pkg/blobstore"
 	"github.com/buildbarn/bb-remote-execution/pkg/builder"
-	"github.com/buildbarn/bb-remote-execution/pkg/configuration/bb_worker"
 	cas_re "github.com/buildbarn/bb-remote-execution/pkg/cas"
+	configuration "github.com/buildbarn/bb-remote-execution/pkg/configuration/bb_worker"
 	"github.com/buildbarn/bb-remote-execution/pkg/environment"
-	"github.com/buildbarn/bb-remote-execution/pkg/proto/scheduler"
+	"github.com/buildbarn/bb-remote-execution/pkg/worker"
 	"github.com/buildbarn/bb-storage/pkg/ac"
 	"github.com/buildbarn/bb-storage/pkg/blobstore"
 	blobstore_configuration "github.com/buildbarn/bb-storage/pkg/blobstore/configuration"
@@ -35,6 +36,8 @@ func main() {
 	// closed off, or creates files with the appropriate mode to be
 	// secure.
 	syscall.Umask(0)
+
+	instanceName := "ubuntu16-04"
 
 	if len(os.Args) != 2 {
 		log.Fatal("Usage: bb_worker bb_worker.conf")
@@ -89,7 +92,7 @@ func main() {
 	actionCache := ac.NewBlobAccessActionCache(actionCacheBlobAccess)
 
 	// Create connection with scheduler.
-	schedulerConnection, err := grpc.Dial(
+	botConnection, err := grpc.Dial(
 		workerConfiguration.SchedulerAddress,
 		grpc.WithInsecure(),
 		grpc.WithUnaryInterceptor(grpc_prometheus.UnaryClientInterceptor),
@@ -97,7 +100,8 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to create scheduler RPC client: ", err)
 	}
-	schedulerClient := scheduler.NewSchedulerClient(schedulerConnection)
+
+	botClient := remoteworker.NewBotClient(botConnection)
 
 	// Execute commands using a separate runner process. Due to the
 	// interaction between threads, forking and execve() returning
@@ -158,45 +162,16 @@ func main() {
 				contentAddressableStorageFlusher)
 
 			// Repeatedly ask the scheduler for work.
+			// Empty platform message for now.
+			platform := &remoteexecution.Platform{}
+			worker := worker.NewClient(botClient, buildExecutor, browserURL, instanceName, platform)
 			for {
-				err := subscribeAndExecute(schedulerClient, buildExecutor, browserURL)
-				log.Print("Failed to subscribe and execute: ", err)
+				if err := worker.BotSession(); err != nil {
+					log.Print("Failed to subscribe and execute: ", err)
+				}
 				time.Sleep(time.Second * 3)
 			}
 		}()
 	}
 	select {}
-}
-
-func subscribeAndExecute(schedulerClient scheduler.SchedulerClient, buildExecutor builder.BuildExecutor, browserURL *url.URL) error {
-	stream, err := schedulerClient.GetWork(context.Background())
-	if err != nil {
-		return err
-	}
-	defer stream.CloseSend()
-
-	for {
-		request, err := stream.Recv()
-		if err != nil {
-			return err
-		}
-
-		// Print URL of the action into the log before execution.
-		actionURL, err := browserURL.Parse(
-			fmt.Sprintf(
-				"/action/%s/%s/%d/",
-				request.InstanceName,
-				request.ActionDigest.Hash,
-				request.ActionDigest.SizeBytes))
-		if err != nil {
-			return err
-		}
-		log.Print("Action: ", actionURL.String())
-
-		response, _ := buildExecutor.Execute(stream.Context(), request)
-		log.Print("ExecuteResponse: ", response)
-		if err := stream.Send(response); err != nil {
-			return err
-		}
-	}
 }
