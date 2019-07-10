@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package pkg.proto.worker;
+
+import "build/bazel/remote/execution/v2/remote_execution.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/worker";
+
+// The Bot API is used to communicate with the Workers.
+// A bot can send its current status and the server may reply with work to
+// do. The server may also send some configuration options or commands.
+service Bot {
+
+  // Simple update service.
+  rpc Update(BotSessionSend) returns (BotSessionResponse);
+}
+
+message BotSessionSend {
+
+  // Should be unique within the farm
+  BotId bot_id = 1;
+
+  // The instance of the execution system to operate against. A server may
+  // support multiple instances of the execution system (with their own workers,
+  // storage, caches, etc.). The server MAY require use of this field to select
+  // between them in an implementation-defined fashion, otherwise it can be
+  // omitted.
+  // Written to by the bot.
+  string instance_name = 2;
+
+  // The platform features available for the execution environment. The server
+  // MAY choose to execute the action on any worker satisfying the requirements,
+  // so the client SHOULD ensure that running the action on any such worker will
+  // have the same result.
+  build.bazel.remote.execution.v2.Platform platform = 3;
+
+  oneof execute {
+
+    // Can return nothing if there is no work.
+    google.protobuf.Empty none = 4;
+
+    // Response from the bot.
+    BotResponse response = 5;
+  }
+}
+
+message BotSessionResponse {
+
+  oneof execute {
+
+    // Can send nothing if there is no work.
+    google.protobuf.Empty none = 1;
+
+    // Work to be executed from the server.
+    build.bazel.remote.execution.v2.ExecuteRequest request = 2;
+  }
+
+  // May contain configuration options.
+  BotConfig config = 7;
+
+  // Commands such as `CANCEL`.
+  BotCommand command = 8;
+}
+
+message BotId {
+
+  // The hostname of the machine the bot is running on.
+  string hostname = 1;
+
+  // When the bot was created.
+  google.protobuf.Timestamp creation_timestamp = 2;
+
+  // UUID.
+  string uuid = 3;
+}
+
+message BotResponse {
+
+  // A non-zero timestamp should indicate current status
+  build.bazel.remote.execution.v2.ExecuteResponse execute_response = 1;
+
+  // Tells the server the execution is finished.
+  bool done = 2;
+}
+
+message BotCommand {
+
+  // Commands sent from the server
+  enum Command {
+
+    // Does nothing.
+    NONE = 0;
+
+    // Bot should cancel the current job.
+    CANCEL = 1;
+  }
+}
+
+message BotConfig {
+
+  // Period of time between last response and new poll message.
+  // In milliseconds.
+  int32 poll_period_ms = 1;
+
+  // When a poll is made, the server may wait for a period of time to respond.
+  // If it exceeds this amount of time, the bot should report an error and
+  // retry the call.
+  // In milliseconds.
+  int32 poll_timeout_ms = 2;
+
+  // Any generic config options that the server could send.
+  map<string, string> config = 3;
+}
