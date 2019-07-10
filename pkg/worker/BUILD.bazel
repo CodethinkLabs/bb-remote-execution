@@ -1,0 +1,16 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "go_default_library",
+    srcs = ["bot.go"],
+    importpath = "github.com/buildbarn/bb-remote-execution/pkg/worker",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/builder:go_default_library",
+        "//pkg/proto/worker:go_default_library",
+        "@com_github_bazelbuild_remote_apis//build/bazel/remote/execution/v2:go_default_library",
+        "@com_github_golang_protobuf//ptypes:go_default_library_gen",
+        "@com_github_google_uuid//:go_default_library",
+        "@io_bazel_rules_go//proto/wkt:empty_go_proto",
+    ],
+)
