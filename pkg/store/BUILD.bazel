@@ -4,6 +4,7 @@ go_library(
     name = "go_default_library",
     srcs = [
         "interfaces.go",
+        "memory.go",
         "worker_build_job.go",
     ],
     importpath = "github.com/buildbarn/bb-remote-execution/pkg/store",
