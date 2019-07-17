@@ -40,5 +40,8 @@ func setDefaultWorkerValues(workerConfiguration *pb.WorkerConfiguration) {
 	if workerConfiguration.MetricsListenAddress == "" {
 		workerConfiguration.MetricsListenAddress = ":80"
 	}
+	if workerConfiguration.InstanceName == "" {
+		workerConfiguration.InstanceName = "local"
+	}
 }
 

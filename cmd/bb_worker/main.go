@@ -37,8 +37,6 @@ func main() {
 	// secure.
 	syscall.Umask(0)
 
-	instanceName := "ubuntu16-04"
-
 	if len(os.Args) != 2 {
 		log.Fatal("Usage: bb_worker bb_worker.conf")
 	}
@@ -164,7 +162,7 @@ func main() {
 			// Repeatedly ask the scheduler for work.
 			// Empty platform message for now.
 			platform := &remoteexecution.Platform{}
-			worker := worker.NewClient(botClient, buildExecutor, browserURL, instanceName, platform)
+			worker := worker.NewClient(botClient, buildExecutor, browserURL, workerConfiguration.InstanceName, platform)
 			for {
 				if err := worker.BotSession(); err != nil {
 					log.Print("Failed to subscribe and execute: ", err)

@@ -217,7 +217,11 @@ func (bq *workerBuildQueue) Update(ctx context.Context, botSession *remoteworker
 		}
 	}
 
-	return &remoteworker.BotSessionResponse{}, nil
+	return &remoteworker.BotSessionResponse{
+		Execute: &remoteworker.BotSessionResponse_None{
+			None: &empty.Empty{},
+		},
+	}, nil
 }
 
 func (bq *workerBuildQueue) GetCapabilities(ctx context.Context, in *remoteexecution.GetCapabilitiesRequest) (*remoteexecution.ServerCapabilities, error) {
