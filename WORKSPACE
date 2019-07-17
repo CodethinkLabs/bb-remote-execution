@@ -68,10 +68,50 @@ go_rules_dependencies()
 
 go_register_toolchains()
 
-load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
+load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies", "go_repository")
 
 gazelle_dependencies()
 
 load("@com_github_buildbarn_bb_storage//:go_dependencies.bzl", "bb_storage_go_dependencies")
 
 bb_storage_go_dependencies()
+
+# etcd dependencies
+
+go_repository(
+    name = "io_etcd_go_etcd",
+    build_extra_args = ["-exclude=vendor"],
+    build_file_proto_mode = "disable",
+    commit = "eb7dd97135a5c60d9d9259886100823114e45815",  # latest release has errors
+    importpath = "go.etcd.io/etcd",
+)
+
+go_repository(
+    name = "org_uber_go_zap",
+    importpath = "go.uber.org/zap",
+    tag = "v1.10.0",
+)
+
+go_repository(
+    name = "org_uber_go_atomic",
+    importpath = "go.uber.org/atomic",
+    tag = "v1.4.0",
+)
+
+go_repository(
+    name = "com_github_coreos_go_systemd",
+    importpath = "github.com/coreos/go-systemd",
+    tag = "v20",
+)
+
+go_repository(
+    name = "com_github_coreos_pkg",
+    importpath = "github.com/coreos/pkg",
+    tag = "v4",
+)
+
+go_repository(
+    name = "org_uber_go_multierr",
+    importpath = "go.uber.org/multierr",
+    tag = "v1.1.0",
+)
