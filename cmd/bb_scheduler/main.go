@@ -34,7 +34,8 @@ func main() {
 		log.Fatal(http.ListenAndServe(schedulerConfiguration.MetricsListenAddress, nil))
 	}()
 
-	executionServer, schedulerServer := builder.NewWorkerBuildQueue(util.DigestKeyWithInstance, schedulerConfiguration.JobsPendingMax)
+	executionServer, schedulerServer := builder.NewWorkerBuildQueue(util.DigestKeyWithInstance,
+		schedulerConfiguration.Jobstore, schedulerConfiguration.Jobqueue, schedulerConfiguration.Botjobmap)
 
 	// RPC server.
 	s := grpc.NewServer(

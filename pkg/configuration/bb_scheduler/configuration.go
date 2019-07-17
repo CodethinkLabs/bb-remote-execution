@@ -22,9 +22,24 @@ func GetSchedulerConfiguration(path string) (*pb.SchedulerConfiguration, error) 
 }
 
 func setDefaultSchedulerValues(schedulerConfiguration *pb.SchedulerConfiguration) {
-	if schedulerConfiguration.JobsPendingMax == 0 {
-		schedulerConfiguration.JobsPendingMax = 100
+	if schedulerConfiguration.Jobstore == nil {
+		schedulerConfiguration.Jobstore = &pb.SchedulerBackendConfiguration{
+			Backend: &pb.SchedulerBackendConfiguration_Memory{},
+		}
 	}
+
+	if schedulerConfiguration.Jobqueue == nil {
+		schedulerConfiguration.Jobqueue = &pb.SchedulerBackendConfiguration{
+			Backend: &pb.SchedulerBackendConfiguration_Memory{},
+		}
+	}
+
+	if schedulerConfiguration.Botjobmap == nil {
+		schedulerConfiguration.Botjobmap = &pb.SchedulerBackendConfiguration{
+			Backend: &pb.SchedulerBackendConfiguration_Memory{},
+		}
+	}
+
 	if schedulerConfiguration.MetricsListenAddress == "" {
 		schedulerConfiguration.MetricsListenAddress = ":80"
 	}

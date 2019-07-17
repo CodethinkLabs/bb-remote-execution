@@ -1,219 +1,200 @@
 package builder
 
 import (
-	"container/heap"
 	"context"
-	"errors"
-	"log"
-	"math"
-	"sync"
-
 	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/bazelbuild/remote-apis/build/bazel/semver"
+	schedulerconfig "github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_scheduler"
 	remoteworker "github.com/buildbarn/bb-remote-execution/pkg/proto/worker"
+	"github.com/buildbarn/bb-remote-execution/pkg/store"
 	"github.com/buildbarn/bb-storage/pkg/builder"
 	"github.com/buildbarn/bb-storage/pkg/util"
-	"github.com/golang/protobuf/ptypes"
-	"github.com/google/uuid"
-	"google.golang.org/genproto/googleapis/longrunning"
+	"github.com/golang/protobuf/ptypes/empty"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"math"
 )
 
-// workerBuildJob holds the information we need to track for a single
-// build action that is enqueued.
-type workerBuildJob struct {
-	name             string
-	actionDigest     *remoteexecution.Digest
-	deduplicationKey string
-	executeRequest   remoteexecution.ExecuteRequest
-	insertionOrder   uint64
-
-	stage                   remoteexecution.ExecuteOperationMetadata_Stage
-	executeResponse         *remoteexecution.ExecuteResponse
-	executeTransitionWakeup *sync.Cond
-}
-
-// workerBuildJobHeap is a heap of workerBuildJob entries, sorted by
-// priority in which they should be execution.
-type workerBuildJobHeap []*workerBuildJob
-
-func (h workerBuildJobHeap) Len() int {
-	return len(h)
-}
-
-func (h workerBuildJobHeap) Less(i, j int) bool {
-	// Lexicographic order on priority and insertion order.
-	var iPriority int32
-	if policy := h[i].executeRequest.ExecutionPolicy; policy != nil {
-		iPriority = policy.Priority
-	}
-	var jPriority int32
-	if policy := h[j].executeRequest.ExecutionPolicy; policy != nil {
-		jPriority = policy.Priority
-	}
-	return iPriority < jPriority || (iPriority == jPriority && h[i].insertionOrder < h[j].insertionOrder)
-}
-
-func (h workerBuildJobHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-func (h *workerBuildJobHeap) Push(x interface{}) {
-	*h = append(*h, x.(*workerBuildJob))
-}
-
-func (h *workerBuildJobHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
-}
-
-func (job *workerBuildJob) waitExecution(out remoteexecution.Execution_ExecuteServer) error {
-	for {
-		// Send current state.
-		metadata, err := ptypes.MarshalAny(&remoteexecution.ExecuteOperationMetadata{
-			Stage:        job.stage,
-			ActionDigest: job.actionDigest,
-		})
-		if err != nil {
-			log.Fatal("Failed to marshal execute operation metadata: ", err)
-		}
-		operation := &longrunning.Operation{
-			Name:     job.name,
-			Metadata: metadata,
-		}
-		if job.executeResponse != nil {
-			operation.Done = true
-			response, err := ptypes.MarshalAny(job.executeResponse)
-			if err != nil {
-				log.Fatal("Failed to marshal execute response: ", err)
-			}
-			operation.Result = &longrunning.Operation_Response{Response: response}
-		}
-		if err := out.Send(operation); err != nil {
-			return err
-		}
-
-		// Wait for state transition.
-		// TODO(edsch): Should take a context.
-		// TODO(edsch): Should wake up periodically.
-		if job.executeResponse != nil {
-			return nil
-		}
-		job.executeTransitionWakeup.Wait()
-	}
-}
-
+// our grpc servers for the scheduler and executor
 type workerBuildQueue struct {
-	deduplicationKeyFormat util.DigestKeyFormat
-	jobsPendingMax         uint64
-	nextInsertionOrder     uint64
-
-	jobsLock                   sync.Mutex
-	jobsNameMap                map[string]*workerBuildJob
-	jobsDeduplicationMap       map[string]*workerBuildJob
-	jobsBotId                  map[string]string
-	jobsPending                workerBuildJobHeap
-	jobsPendingInsertionWakeup *sync.Cond
+	jobStore    store.JobStore
+	jobQueue    store.JobQueue
+	jobNotifier store.JobStateNotifier
+	botJobMap   store.BotJobMap
 }
 
 // NewWorkerBuildQueue creates an execution server that places execution
 // requests in a queue. These execution requests may be extracted by
 // workers.
-func NewWorkerBuildQueue(deduplicationKeyFormat util.DigestKeyFormat, jobsPendingMax uint64) (builder.BuildQueue, remoteworker.BotServer) {
-	bq := &workerBuildQueue{
-		deduplicationKeyFormat: deduplicationKeyFormat,
-		jobsPendingMax:         jobsPendingMax,
+func NewWorkerBuildQueue(
+	deduplicationKeyFormat util.DigestKeyFormat,
+	jobStoreConfig *schedulerconfig.SchedulerBackendConfiguration,
+	jobQueueConfig *schedulerconfig.SchedulerBackendConfiguration,
+	botJobMapConfig *schedulerconfig.SchedulerBackendConfiguration) (builder.BuildQueue, remoteworker.BotServer) {
 
-		jobsNameMap:          map[string]*workerBuildJob{},
-		jobsDeduplicationMap: map[string]*workerBuildJob{},
-		jobsBotId:            map[string]string{},
+	var bq workerBuildQueue
+
+	// configure the job store
+	switch jobStoreConfig.Backend.(type) {
+	case *schedulerconfig.SchedulerBackendConfiguration_Memory:
+		jobStore, jobNotifier := store.NewMemoryJobStore(deduplicationKeyFormat)
+		bq.jobStore = jobStore
+		bq.jobNotifier = jobNotifier
+	case *schedulerconfig.SchedulerBackendConfiguration_Etcd:
+		clusterAddress := jobStoreConfig.Backend.(*schedulerconfig.SchedulerBackendConfiguration_Etcd).Etcd.ClusterAddress
+
+		jobStore, err := store.NewEtcdJobStore(deduplicationKeyFormat, clusterAddress)
+		if err != nil {
+			panic(err)
+		}
+
+		jobNotifier, err := store.NewEtcdJobStateNotifier(context.TODO(), clusterAddress)
+		if err != nil {
+			panic(err)
+		}
+
+		bq.jobStore = jobStore
+		bq.jobNotifier = jobNotifier
 	}
-	bq.jobsPendingInsertionWakeup = sync.NewCond(&bq.jobsLock)
 
-	return bq, bq
+	// configure the job queue
+	switch jobQueueConfig.Backend.(type) {
+	case *schedulerconfig.SchedulerBackendConfiguration_Memory:
+		bq.jobQueue = store.NewMemoryJobHeap()
+	case *schedulerconfig.SchedulerBackendConfiguration_Etcd:
+		clusterAddress := jobQueueConfig.Backend.(*schedulerconfig.SchedulerBackendConfiguration_Etcd).Etcd.ClusterAddress
+
+		jobQueue, err := store.NewEtcdJobPriorityQueue(clusterAddress)
+		if err != nil {
+			panic(err)
+		}
+
+		bq.jobQueue = jobQueue
+	}
+
+	// configure the bot job map
+	switch botJobMapConfig.Backend.(type) {
+	case *schedulerconfig.SchedulerBackendConfiguration_Memory:
+		bq.botJobMap = store.MemoryBotJobMap{}
+	case *schedulerconfig.SchedulerBackendConfiguration_Etcd:
+		clusterAddress := botJobMapConfig.Backend.(*schedulerconfig.SchedulerBackendConfiguration_Etcd).Etcd.ClusterAddress
+
+		botJobMap, err := store.NewEtcdBotJobMap(clusterAddress)
+		if err != nil {
+			panic(err)
+		}
+
+		bq.botJobMap = botJobMap
+	}
+
+	return &bq, &bq
 }
 
+// TODO(arlyon): transaction and rollback in case of error
+// currently if a step errors out, jobs may be lost.
 func (bq *workerBuildQueue) getJob(ctx context.Context, botSession *remoteworker.BotSessionSend) (*remoteworker.BotSessionResponse, error) {
-	// Wait for jobs to appear.
-	// TODO(edsch): sync.Cond.WaitWithContext() would be helpful here.
-	for bq.jobsPending.Len() == 0 {
-		bq.jobsPendingInsertionWakeup.Wait()
+	jobName, err := bq.jobQueue.Pop(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "error while popping job from queue: "+err.Error())
 	}
 
-	if err := ctx.Err(); err != nil {
-		bq.jobsPendingInsertionWakeup.Signal()
-		return nil, err
+	err = bq.botJobMap.Put(ctx, botSession.BotId.String(), *jobName)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "error while assigning bot to job: "+err.Error())
 	}
 
-	// Extract job from queue.
-	job := heap.Pop(&bq.jobsPending).(*workerBuildJob)
-	bq.jobsBotId[botSession.BotId.String()] = job.name
+	job, err := bq.jobStore.Get(ctx, *jobName)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "error while getting bot job from store: "+err.Error())
+	}
 
-	job.stage = remoteexecution.ExecuteOperationMetadata_EXECUTING
-	// Should transition when setting status?
-	// job.executeTransitionWakeup.Broadcast()
-
-	execute := &remoteworker.BotSessionResponse_Request{
-		Request: &job.executeRequest,
+	job.Stage = remoteexecution.ExecuteOperationMetadata_EXECUTING
+	err = bq.jobStore.Update(ctx, job)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "error while setting job state to executing: "+err.Error())
 	}
 
 	botSessionResponse := &remoteworker.BotSessionResponse{
-		Execute: execute,
+		Execute: &remoteworker.BotSessionResponse_Request{
+			Request: &job.ExecuteRequest,
+		},
 	}
 
 	return botSessionResponse, nil
 }
 
 func (bq *workerBuildQueue) Update(ctx context.Context, botSession *remoteworker.BotSessionSend) (*remoteworker.BotSessionResponse, error) {
-	bq.jobsLock.Lock()
-	defer bq.jobsLock.Unlock()
 	botId := botSession.BotId.String()
 
 	switch botSession.Execute.(type) {
 	case *remoteworker.BotSessionSend_None:
-		// Look to see if the worker had been assigned a job
-		jobName, assigned := bq.jobsBotId[botId]
-
-		if !assigned {
+		jobName, err := bq.botJobMap.Get(ctx, botId)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, err.Error())
+		} else if jobName == nil {
 			return bq.getJob(ctx, botSession)
 		}
 
-		// Something went very wrong here...
-		if job, ok := bq.jobsNameMap[jobName]; !ok {
-			delete(bq.jobsDeduplicationMap, job.deduplicationKey)
-			delete(bq.jobsBotId, botId)
-			job.stage = remoteexecution.ExecuteOperationMetadata_COMPLETED
-			job.executeResponse = &remoteexecution.ExecuteResponse{
-				Status: status.New(codes.Internal, "the bot lost the job").Proto(),
+		// TODO(arlyon) transaction and rollback in case of error
+		// error: bot doesn't know about it's job
+		job, err := bq.jobStore.Get(ctx, *jobName)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		if job != nil {
+			err = bq.botJobMap.Delete(ctx, botId)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, err.Error())
 			}
-			job.executeTransitionWakeup.Broadcast()
+
+			// complete the job, and propagate the error up to client
+			job.Stage = remoteexecution.ExecuteOperationMetadata_COMPLETED
+			job.ExecuteResponse = &remoteexecution.ExecuteResponse{
+				Status: status.New(codes.Internal, "missing job on bot "+botId).Proto(),
+			}
+
+			err = bq.jobStore.Update(ctx, job)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, err.Error())
+			}
 		}
 
-		return &remoteworker.BotSessionResponse{}, errors.New("the bot lost the job")
+		return nil, status.Errorf(codes.Internal, "missing job on bot %s", botId)
 
 	case *remoteworker.BotSessionSend_Response:
 		response := botSession.GetResponse()
-		jobName, ok := bq.jobsBotId[botId]
-		if !ok {
-			return &remoteworker.BotSessionResponse{}, errors.New("bot not assigned a job")
+
+		jobName, err := bq.botJobMap.Get(ctx, botId)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, err.Error())
+		} else if jobName == nil {
+			return nil, status.Errorf(codes.NotFound, "bot not assigned a job")
 		}
 
-		job, ok := bq.jobsNameMap[jobName]
-		if !ok {
-			return &remoteworker.BotSessionResponse{}, errors.New("job does not exist")
+		job, err := bq.jobStore.Get(ctx, *jobName)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, err.Error())
+		} else if job == nil {
+			return nil, status.Errorf(codes.NotFound, "job does not exist")
 		}
 
 		if response.Done {
-			delete(bq.jobsDeduplicationMap, job.deduplicationKey)
-			delete(bq.jobsBotId, botId)
+			job.Stage = remoteexecution.ExecuteOperationMetadata_COMPLETED
+			job.ExecuteResponse = response.ExecuteResponse
 
-			job.stage = remoteexecution.ExecuteOperationMetadata_COMPLETED
-			job.executeResponse = response.ExecuteResponse
-			job.executeTransitionWakeup.Broadcast()
+			// TODO(arlyon) transaction and rollback in case of error
+			// TODO(arlyon) delete the job after some time
+			// we update the job in the store before deletion to allow
+			// listeners waiting for its completion to be notified
+			err = bq.jobStore.Update(ctx, job)
+			if err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
+
+			err = bq.botJobMap.Delete(ctx, botId)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, err.Error())
+			}
 		}
 	}
 
@@ -255,49 +236,32 @@ func (bq *workerBuildQueue) GetCapabilities(ctx context.Context, in *remoteexecu
 	}, nil
 }
 
+// TODO(arlyon) transaction and roll back in case of error
 func (bq *workerBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out remoteexecution.Execution_ExecuteServer) error {
-	digest, err := util.NewDigest(in.InstanceName, in.ActionDigest)
+	ctx := context.TODO()
 
+	job, existed, err := bq.jobStore.Submit(ctx, in)
 	if err != nil {
-		return err
-	}
-	deduplicationKey := digest.GetKey(bq.deduplicationKeyFormat)
-
-	bq.jobsLock.Lock()
-	defer bq.jobsLock.Unlock()
-
-	job, ok := bq.jobsDeduplicationMap[deduplicationKey]
-	if !ok {
-		// TODO(edsch): Maybe let the number of workers influence this?
-		if uint64(bq.jobsPending.Len()) >= bq.jobsPendingMax {
-			return status.Errorf(codes.Unavailable, "Too many jobs pending")
+		return status.Errorf(codes.Internal, "error when submitting execute request: %s", err.Error())
+	} else if !existed {
+		err = bq.jobQueue.Push(ctx, job)
+		if err != nil {
+			return status.Errorf(codes.Internal, "error when pushing job to queue: %s", err.Error())
 		}
-
-		job = &workerBuildJob{
-			name:                    uuid.Must(uuid.NewRandom()).String(),
-			actionDigest:            in.ActionDigest,
-			deduplicationKey:        deduplicationKey,
-			executeRequest:          *in,
-			insertionOrder:          bq.nextInsertionOrder,
-			stage:                   remoteexecution.ExecuteOperationMetadata_QUEUED,
-			executeTransitionWakeup: sync.NewCond(&bq.jobsLock),
-		}
-		bq.jobsNameMap[job.name] = job
-		bq.jobsDeduplicationMap[deduplicationKey] = job
-		heap.Push(&bq.jobsPending, job)
-		bq.jobsPendingInsertionWakeup.Signal()
-		bq.nextInsertionOrder++
 	}
-	return job.waitExecution(out)
+
+	return job.WaitExecution(ctx, bq.jobNotifier, bq.jobStore, out)
 }
 
 func (bq *workerBuildQueue) WaitExecution(in *remoteexecution.WaitExecutionRequest, out remoteexecution.Execution_WaitExecutionServer) error {
-	bq.jobsLock.Lock()
-	defer bq.jobsLock.Unlock()
+	ctx := context.TODO()
 
-	job, ok := bq.jobsNameMap[in.Name]
-	if !ok {
-		return status.Errorf(codes.NotFound, "Build job with name %s not found", in.Name)
+	job, err := bq.jobStore.Get(ctx, in.Name)
+	if err != nil {
+		return status.Errorf(codes.Internal, "error when getting requested job: %s", err.Error())
+	} else if job == nil {
+		return status.Errorf(codes.NotFound, "build job with name %s not found", in.Name)
 	}
-	return job.waitExecution(out)
+
+	return job.WaitExecution(ctx, bq.jobNotifier, bq.jobStore, out)
 }

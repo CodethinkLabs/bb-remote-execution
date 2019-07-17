@@ -5,12 +5,33 @@ package buildbarn.configuration.bb_scheduler;
 option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_scheduler";
 
 message SchedulerConfiguration {
-  // Maximum number of build actions that can be enqueued. Defaults to 100.
-  uint64 jobs_pending_max = 1;
-
   // Address on which to listen to expose Prometheus metrics. Defaults to ":80".
   string metrics_listen_address = 2;
 
   // Address on which to listen for RPCs. Defaults to ":8981".
   string grpc_listen_address = 3;
+
+  // Config for the scheduler job store. Defaults to in-memory.
+  SchedulerBackendConfiguration jobstore = 4;
+
+  // Config for the scheduler job queue. Defaults to in-memory.
+  SchedulerBackendConfiguration jobqueue = 5;
+
+  // Config for the scheduler bot job map. Defaults to in-memory.
+  SchedulerBackendConfiguration botjobmap = 6;
+}
+
+message SchedulerBackendConfiguration {
+  oneof backend {
+    MemoryConfiguration memory = 1;
+    EtcdConfiguration etcd = 2;
+  }
+}
+
+message MemoryConfiguration {
+
+}
+
+message EtcdConfiguration {
+  repeated string clusterAddress = 1;
 }
