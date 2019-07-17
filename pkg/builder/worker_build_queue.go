@@ -2,6 +2,7 @@ package builder
 
 import (
 	"context"
+	"fmt"
 	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/bazelbuild/remote-apis/build/bazel/semver"
 	schedulerconfig "github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_scheduler"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"math"
+	"time"
 )
 
 // our grpc servers for the scheduler and executor
@@ -183,7 +185,6 @@ func (bq *workerBuildQueue) Update(ctx context.Context, botSession *remoteworker
 			job.ExecuteResponse = response.ExecuteResponse
 
 			// TODO(arlyon) transaction and rollback in case of error
-			// TODO(arlyon) delete the job after some time
 			// we update the job in the store before deletion to allow
 			// listeners waiting for its completion to be notified
 			err = bq.jobStore.Update(ctx, job)
@@ -195,6 +196,18 @@ func (bq *workerBuildQueue) Update(ctx context.Context, botSession *remoteworker
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, err.Error())
 			}
+
+			go func() {
+				for {
+					// TODO(arlyon) make the job deletion timer user-configurable
+					time.Sleep(time.Minute)
+					err := bq.jobStore.Delete(context.TODO(), *jobName)
+					if err == nil {
+						return
+					}
+					fmt.Println("Could not remove", *jobName, "from job store (", err, "). Trying again in 1 minute.")
+				}
+			}()
 		}
 	}
 
